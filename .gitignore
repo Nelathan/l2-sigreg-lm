@@ -1,0 +1,14 @@
+.DS_Store
+.python-version
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+data/cache/
+results/
+checkpoints/

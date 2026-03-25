@@ -1,0 +1,4 @@
+[submodule "submodules/lejepa"]
+	path = submodules/lejepa
+	url = https://github.com/galilai-group/lejepa.git
+
