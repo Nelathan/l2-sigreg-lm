@@ -1,7 +1,7 @@
 [project]
-name = "token-packing-lab"
+name = "l2-sigreg-lm"
 version = "0.1.0"
-description = "Compact M1-friendly lab comparing L2 embedding prediction + SIGReg against CE."
+description = "Compact M1-friendly lab comparing pure L2 embedding prediction + SIGReg against CE."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

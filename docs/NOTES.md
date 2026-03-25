@@ -15,7 +15,8 @@ Use it to capture:
 
 ## Current Status
 
-- 2026-03-25: Chosen working repo name is `token-packing-lab`.
+- 2026-03-25: Chosen working repo name is `l2-sigreg-lm`.
+- 2026-03-25: Renamed the GitHub repository to `l2-sigreg-lm` so the project name matches the actual experiment.
 - 2026-03-25: Added a lightweight lint step (`scripts/lint.sh`) and made it part of the pre-push lifecycle.
 - 2026-03-24: Repository initialized from `SPEC.md`.
 - 2026-03-24: Added project scaffold, agent instructions, and note-taking structure.

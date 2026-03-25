@@ -1,6 +1,6 @@
-# Token Packing Lab
+# L2-SIGReg LM
 
-Small-scale training repo for testing whether an autoregressive transformer can learn useful token retrieval with an L2 embedding objective plus SIGReg regularization, compared against a matched cross-entropy baseline.
+Small-scale training repo for testing whether an autoregressive transformer can learn useful token retrieval with a pure L2 embedding predictor plus SIGReg regularization, compared against a matched cross-entropy baseline.
 
 The authoritative project definition lives in `SPEC.md`.
 

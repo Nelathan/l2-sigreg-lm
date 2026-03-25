@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`token-packing-lab` is a deliberately compact language-model training experiment on Apple Silicon. The goal is to compare:
+`l2-sigreg-lm` is a deliberately compact language-model training experiment on Apple Silicon. The goal is to compare:
 
 - `l2_sigreg`: transformer trained to predict the next-token embedding with L2 loss plus SIGReg regularization
 - `ce_baseline`: same transformer trunk trained with tied-embedding cross-entropy
