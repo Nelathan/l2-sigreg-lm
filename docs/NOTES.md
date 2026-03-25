@@ -15,6 +15,17 @@ Use it to capture:
 
 ## Current Status
 
+- 2026-03-25: Renamed the project and GitHub repo to `l2-sigreg-lm` so the title reflects the actual experiment: pure L2 embedding prediction plus SIGReg shaping, not token packing as the identity of the repo.
+- 2026-03-25: Added linting as a pre-push gate via `scripts/lint.sh`, and the repo now passes `ruff check` plus `ruff format --check`.
+- 2026-03-25: The strongest current L2 debug recipe is `embedding_init_std=0.01`, `prediction_head_init_std=0.0`, `l2_embedding_lr_scale=0.1`, `lambda_sigreg=0.05`, and SIGReg sampled over `2048` random vocab embeddings rather than only active document rows.
+- 2026-03-25: Learned-output-scale and the mixed SIGReg pool over active-plus-random embeddings were both informative but not yet the right balance in the tested forms; the larger `0.8` init made SIGReg happier but hurt rank geometry, while the smaller `0.01` init preserved retrieval better.
+- 2026-03-25: `MRR` remains the primary metric and `average_rank` is the best progress curve; `median_rank` is no longer needed for the active analysis loop.
+- 2026-03-25: The next ablation is SIGReg sparsity, for example averaging over multiple `1024`-sample batches instead of a single harsh sample.
+- 2026-03-25: The next optimization question is whether `l2_embedding_lr_scale` should stay at `0.1` or move back toward `1.0` once SIGReg is reduced.
+- 2026-03-25: Performance tuning and broader benchmark work should wait until the 4070 Super box is available.
+- 2026-03-25: Once SIGReg is stable, re-sweep `embedding_init_std` to find the new best radius for the embedding table.
+- 2026-03-25: After the predictor stabilizes, test whether the head projector is still needed or whether it was mainly compensating for SIGReg applied to predictions.
+- 2026-03-25: Revisit a mixed SIGReg token pool that includes some active tokens plus random vocab rows, to test whether active tokens also benefit from the isotropy pressure as a kind of rubber-band effect.
 - 2026-03-25: Chosen working repo name is `l2-sigreg-lm`.
 - 2026-03-25: Renamed the GitHub repository to `l2-sigreg-lm` so the project name matches the actual experiment.
 - 2026-03-25: Added a lightweight lint step (`scripts/lint.sh`) and made it part of the pre-push lifecycle.
