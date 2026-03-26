@@ -56,6 +56,9 @@ class HuggingFaceTokenizerAdapter(TokenizerAdapter):
         self.name = name
         self.vocab_size = len(tokenizer)
         self.eot_token_id = int(tokenizer.eos_token_id)
+        self.bos_token_id = (
+            int(tokenizer.bos_token_id) if tokenizer.bos_token_id is not None else None
+        )
 
     def encode_document(self, text: str) -> EncodedDocument:
         encoded = self.tokenizer(
@@ -66,6 +69,10 @@ class HuggingFaceTokenizerAdapter(TokenizerAdapter):
         token_ids = list(encoded["input_ids"])
         offsets = list(encoded["offset_mapping"])
         byte_lengths = [len(text[start:end].encode("utf-8")) for start, end in offsets]
+        # BOS at start, EOT at end — proper document framing
+        if self.bos_token_id is not None:
+            token_ids.insert(0, self.bos_token_id)
+            byte_lengths.insert(0, 0)
         token_ids.append(self.eot_token_id)
         byte_lengths.append(0)
         return EncodedDocument(token_ids=token_ids, byte_lengths=byte_lengths)

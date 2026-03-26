@@ -7,36 +7,59 @@ import json
 import math
 import random
 import time
-from itertools import cycle
 from pathlib import Path
 from dataclasses import replace
 
-import numpy as np
-import torch
+from dotenv import load_dotenv
 
-from src.config import ExperimentConfig, get_config
-from src.data import Batch, build_dataloaders
-from src.eval import compute_ce_nll, compute_harmax_nll, compute_retrieval_metrics
-from src.model import (
+load_dotenv()  # load project .env before any library imports that read env vars
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+
+try:
+    import wandb  # noqa: E402
+except ImportError:
+    wandb = None  # type: ignore[assignment]
+
+from src.config import ExperimentConfig, get_config  # noqa: E402
+from src.data import Batch, build_dataloaders  # noqa: E402
+from src.eval import compute_ce_nll, compute_harmax_nll, compute_retrieval_metrics  # noqa: E402
+from src.model import (  # noqa: E402
     PackingTransformer,
     build_sigreg_loss,
     compute_ce_loss,
     compute_l2_loss,
 )
-from src.monitor import (
+from src.monitor import (  # noqa: E402
     average_pairwise_cosine_similarity,
     effective_dimensionality,
     matrix_effective_rank,
     nearest_neighbor_collision_rate,
     singular_values,
 )
-from src.tokenization import get_tokenizer
+from src.tokenization import get_tokenizer  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train L2 or CE packing experiment.")
     parser.add_argument(
         "--config", required=True, help="Preset name, e.g. l2_debug or ce_debug"
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="l2-sigreg-lm",
+        help="W&B project name (default: l2-sigreg-lm).",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default=None,
+        help="W&B team/entity name (required if personal entities are disabled).",
     )
     return parser.parse_args()
 
@@ -176,30 +199,33 @@ def build_sigreg_inputs(
 ) -> torch.Tensor:
     pieces: list[torch.Tensor] = []
 
-    if config.objective.sigreg_include_active_predictions:
-        active_prediction = prediction[target_mask]
-        if active_prediction.numel() > 0:
-            pieces.append(active_prediction)
+    device = prediction.device
+    vocab_size = model.token_embeddings.num_embeddings
+    active_vocab = target_ids[target_mask].unique()
 
+    # Always include embeddings of active batch tokens
+    if config.objective.sigreg_include_active_predictions and active_vocab.numel() > 0:
+        pieces.append(model.token_embeddings(active_vocab))
+
+    # Add random vocab embeddings (excluding active tokens)
     random_vocab_size = max(config.objective.sigreg_random_vocab_size, 0)
     if random_vocab_size > 0:
-        device = prediction.device
-        vocab_size = model.token_embeddings.num_embeddings
-        active_vocab = target_ids[target_mask].unique()
         if active_vocab.numel() >= vocab_size:
             sampled_ids = torch.arange(vocab_size, device=device)
         else:
             sampled_ids = torch.randperm(vocab_size, device=device)
             if active_vocab.numel() > 0:
-                active_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
-                active_mask[active_vocab] = True
-                sampled_ids = sampled_ids[~active_mask[sampled_ids]]
+                excl_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+                excl_mask[active_vocab] = True
+                sampled_ids = sampled_ids[~excl_mask[sampled_ids]]
             sampled_ids = sampled_ids[: min(random_vocab_size, sampled_ids.numel())]
         if sampled_ids.numel() > 0:
             pieces.append(model.token_embeddings(sampled_ids))
 
     if not pieces:
-        return prediction[target_mask]
+        # Fallback: random vocab sample
+        sampled_ids = torch.randperm(vocab_size, device=device)[:1024]
+        return model.token_embeddings(sampled_ids)
     if len(pieces) == 1:
         return pieces[0]
     return torch.cat(pieces, dim=0)
@@ -237,7 +263,8 @@ def compute_loss(
                 target_ids=batch.target_ids,
             )
             sigreg_value = sigreg_loss_fn(sigreg_input)
-        loss = pred_loss + (sigreg_weight * sigreg_value)
+        pred_scale = config.objective.pred_loss_scale
+        loss = (pred_scale * pred_loss) + (sigreg_weight * sigreg_value)
         metrics = {
             "loss_pred": float(pred_loss.item()),
             "loss_sigreg": float(sigreg_value.item()),
@@ -335,9 +362,11 @@ def collect_gradient_metrics(
 def run_validation(
     config: ExperimentConfig,
     model: PackingTransformer,
-    val_loader: torch.utils.data.DataLoader[Batch],
+    val_iter: object,
     sigreg_loss_fn: torch.nn.Module | None,
     device: torch.device,
+    max_val_batches: int = 50,
+    autocast_ctx: torch.autocast | None = None,
 ) -> dict[str, float | list[float]]:
     model.eval()
     total_batches = 0
@@ -356,13 +385,21 @@ def run_validation(
     total_pred_loss = 0.0
     total_sigreg_loss = 0.0
 
-    for batch in val_loader:
-        batch = batch.to(device)
-        output = model(
-            input_ids=batch.input_ids,
-            attention_mask=batch.attention_mask,
-            position_ids=batch.position_ids,
-        )
+    for _ in range(max_val_batches):
+        batch = next(val_iter).to(device)
+        if autocast_ctx is not None:
+            with autocast_ctx:
+                output = model(
+                    input_ids=batch.input_ids,
+                    attention_mask=batch.attention_mask,
+                    position_ids=batch.position_ids,
+                )
+        else:
+            output = model(
+                input_ids=batch.input_ids,
+                attention_mask=batch.attention_mask,
+                position_ids=batch.position_ids,
+            )
         prediction = output.prediction
         total_batches += 1
         target_mask = batch.target_ids.ne(-100)
@@ -452,15 +489,90 @@ def run_validation(
     return metrics
 
 
+def _config_to_flat_dict(config: ExperimentConfig) -> dict[str, object]:
+    """Flatten nested config dataclasses into a single dict for wandb."""
+    from dataclasses import asdict
+
+    raw = asdict(config)
+    flat: dict[str, object] = {"name": raw.pop("name")}
+    for section_name, section in raw.items():
+        if isinstance(section, dict):
+            for key, value in section.items():
+                flat[f"{section_name}/{key}"] = value
+        else:
+            flat[section_name] = section
+    return flat
+
+
+class WandbLogger:
+    """Deferred wandb logger — only creates a run on first log call."""
+
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        project: str,
+        entity: str | None,
+        enabled: bool,
+    ) -> None:
+        self._config = config
+        self._project = project
+        self._entity = entity
+        self._enabled = enabled and wandb is not None
+        self._initialized = False
+        if enabled and wandb is None:
+            print("WARNING: wandb requested but not installed. Logging locally only.")
+
+    def _ensure_init(self) -> None:
+        if self._initialized or not self._enabled:
+            return
+        wandb.init(
+            project=self._project,
+            entity=self._entity,
+            name=self._config.name,
+            config=_config_to_flat_dict(self._config),
+            reinit="finish_previous",
+        )
+        self._initialized = True
+
+    def log(self, payload: dict[str, object], step: int) -> None:
+        if not self._enabled:
+            return
+        self._ensure_init()
+        loggable: dict[str, object] = {}
+        for key, value in payload.items():
+            if key in ("step", "split"):
+                continue
+            if isinstance(value, (int, float)):
+                prefix = payload.get("split", "train")
+                loggable[f"{prefix}/{key}"] = value
+            elif key == "singular_values" and isinstance(value, list):
+                loggable["val/singular_values"] = wandb.Histogram(value)
+        wandb.log(loggable, step=step)
+
+    def finish(self) -> None:
+        if self._initialized and wandb is not None:
+            wandb.finish()
+
+
+def _aggregate_metrics(
+    buffer: list[dict[str, float]],
+) -> dict[str, float]:
+    """Average a list of per-step metric dicts."""
+    if not buffer:
+        return {}
+    keys = buffer[0].keys()
+    return {k: sum(d[k] for d in buffer) / len(buffer) for k in keys}
+
+
 def main() -> None:
     args = parse_args()
     config = finalize_config(get_config(args.config))
     ensure_dirs(config)
     set_seed(config.runtime.seed)
     device = autodetect_device(config.runtime.device)
+    wb = WandbLogger(config, args.wandb_project, args.wandb_entity, not args.no_wandb)
 
-    train_loader, val_loader, _ = build_dataloaders(config.data)
-    train_iter = cycle(train_loader)
+    train_iter, val_iter, _ = build_dataloaders(config.data)
 
     model = PackingTransformer(config).to(device)
     optimizer = build_optimizer(config, model)
@@ -468,10 +580,36 @@ def main() -> None:
     if sigreg_loss_fn is not None:
         sigreg_loss_fn = sigreg_loss_fn.to(device)
 
+    # Mixed precision: bf16 forward/backward, fp32 master weights and loss
+    use_amp = device.type == "cuda" and config.runtime.dtype == "bfloat16"
+    autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_amp else None
+
     log_path = config.output_path / f"{config.name}.jsonl"
     if log_path.exists():
         log_path.unlink()
     start_time = time.time()
+    metric_buffer: list[dict[str, float]] = []
+
+    def _run_and_log_val(step: int) -> None:
+        payload = {
+            "step": step,
+            "split": "val",
+            "elapsed_s": time.time() - start_time,
+            **run_validation(
+                config,
+                model,
+                val_iter,
+                sigreg_loss_fn,
+                device,
+                autocast_ctx=autocast_ctx,
+            ),
+        }
+        append_jsonl(log_path, payload)
+        wb.log(payload, step)
+        print(json.dumps(payload))
+
+    # Initial validation baseline before any training
+    _run_and_log_val(0)
 
     for step in range(config.runtime.train_steps):
         batch = next(train_iter).to(device)
@@ -479,9 +617,15 @@ def main() -> None:
         apply_learning_rate(optimizer, learning_rate)
 
         optimizer.zero_grad(set_to_none=True)
-        loss, train_metrics, _ = compute_loss(
-            config, model, batch, sigreg_loss_fn, step
-        )
+        if autocast_ctx is not None:
+            with autocast_ctx:
+                loss, train_metrics, _ = compute_loss(
+                    config, model, batch, sigreg_loss_fn, step
+                )
+        else:
+            loss, train_metrics, _ = compute_loss(
+                config, model, batch, sigreg_loss_fn, step
+            )
         loss.backward()
 
         if (
@@ -496,31 +640,30 @@ def main() -> None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.optim.grad_clip_norm)
         optimizer.step()
 
-        if step % config.runtime.log_every == 0:
+        train_metrics["learning_rate"] = learning_rate
+        metric_buffer.append(train_metrics)
+
+        if (step + 1) % config.runtime.log_every == 0:
+            aggregated = _aggregate_metrics(metric_buffer)
+            metric_buffer.clear()
             payload = {
                 "step": step,
                 "split": "train",
-                "learning_rate": learning_rate,
                 "elapsed_s": time.time() - start_time,
-                **train_metrics,
+                **aggregated,
             }
             append_jsonl(log_path, payload)
+            wb.log(payload, step)
             print(json.dumps(payload))
 
         if (step + 1) % config.runtime.eval_every == 0:
-            payload = {
-                "step": step,
-                "split": "val",
-                "elapsed_s": time.time() - start_time,
-                **run_validation(config, model, val_loader, sigreg_loss_fn, device),
-            }
-            append_jsonl(log_path, payload)
-            print(json.dumps(payload))
+            _run_and_log_val(step)
 
         if (step + 1) % config.runtime.checkpoint_every == 0:
             save_checkpoint(config, step + 1, model, optimizer)
 
     save_checkpoint(config, config.runtime.train_steps, model, optimizer)
+    wb.finish()
 
 
 if __name__ == "__main__":

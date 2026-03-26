@@ -18,6 +18,7 @@ class ModelConfig:
     rope_base: int = 10_000
     embedding_init_std: float = 0.02
     prediction_head_init_std: float = 0.02
+    use_prediction_head: bool = True
     output_scale_init: float = 1.0
 
 
@@ -37,30 +38,10 @@ class OptimConfig:
 
 @dataclass(frozen=True)
 class DataConfig:
-    dataset_name: str = "HuggingFaceFW/finewiki"
-    dataset_split: str = "train"
-    dataset_languages: tuple[str, ...] = (
-        "en",
-        "ar",
-        "zh",
-        "fr",
-        "de",
-        "ja",
-        "ko",
-        "es",
-    )
-    streaming: bool = True
-    use_cache: bool = True
-    cache_dir: str = "data/cache"
-    batch_size: int = 16
-    eval_batch_size: int = 16
     tokenizer_name: str = "lfm25"
     max_seq_len: int = 512
-    train_token_budget: int = 262_144
-    val_token_budget: int = 32_768
-    max_train_documents: int | None = 4_096
-    max_val_documents: int | None = 512
-    num_workers: int = 0
+    batch_size: int = 16
+    eval_batch_size: int = 16
     pin_memory: bool = False
 
 
@@ -89,6 +70,7 @@ class ObjectiveConfig:
     learned_output_scale: bool = False
     sigreg_random_vocab_size: int = 0
     sigreg_include_active_predictions: bool = True
+    pred_loss_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -179,10 +161,6 @@ def _l2_debug_config(
         ),
         batch_size=8,
         eval_batch_size=8,
-        train_token_budget=65_536,
-        val_token_budget=8_192,
-        max_train_documents=512,
-        max_val_documents=128,
     )
 
 
@@ -210,10 +188,6 @@ def _l2_debug_ablation_config(
         ),
         batch_size=8,
         eval_batch_size=8,
-        train_token_budget=65_536,
-        val_token_budget=8_192,
-        max_train_documents=512,
-        max_val_documents=128,
     )
 
 
@@ -241,10 +215,6 @@ def _l2_midrun_config(
         ),
         batch_size=8,
         eval_batch_size=8,
-        train_token_budget=131_072,
-        val_token_budget=8_192,
-        max_train_documents=1_024,
-        max_val_documents=128,
     )
 
 
@@ -273,10 +243,6 @@ def _l2_vocab_sigreg_debug_config(
         ),
         batch_size=8,
         eval_batch_size=8,
-        train_token_budget=65_536,
-        val_token_budget=8_192,
-        max_train_documents=512,
-        max_val_documents=128,
     )
 
 
@@ -299,10 +265,6 @@ def _l2_debug_nowarm_init_config(
         ),
         batch_size=8,
         eval_batch_size=8,
-        train_token_budget=65_536,
-        val_token_budget=8_192,
-        max_train_documents=512,
-        max_val_documents=128,
     )
 
 
@@ -319,10 +281,58 @@ def _l2_longrun_config(name: str, train_steps: int) -> ExperimentConfig:
         ),
         batch_size=8,
         eval_batch_size=8,
-        train_token_budget=524_288,
-        val_token_budget=16_384,
-        max_train_documents=4_096,
-        max_val_documents=256,
+    )
+
+
+def _gpu_baseline_config(
+    name: str,
+    objective_name: str,
+    *,
+    train_steps: int,
+    batch_size: int = 8,
+    lambda_sigreg: float = 0.0,
+    sigreg_random_vocab_size: int = 0,
+    l2_embedding_lr_scale: float = 1.0,
+    embedding_init_std: float = 0.02,
+    prediction_head_init_std: float = 0.02,
+) -> ExperimentConfig:
+    """GPU-scale preset for the 4070 Super (12 GB VRAM)."""
+    model = replace(
+        ModelConfig(),
+        embedding_init_std=embedding_init_std,
+        prediction_head_init_std=prediction_head_init_std,
+    )
+    objective = ObjectiveConfig(
+        name=objective_name,
+        lambda_sigreg=lambda_sigreg,
+        sigreg_warmup_steps=0,
+        num_slices=1_024,
+        sigreg_random_vocab_size=sigreg_random_vocab_size,
+        sigreg_include_active_predictions=objective_name == "l2_sigreg",
+    )
+    return ExperimentConfig(
+        name=name,
+        objective=objective,
+        model=model,
+        optim=replace(
+            OptimConfig(),
+            l2_embedding_lr_scale=l2_embedding_lr_scale,
+        ),
+        data=replace(
+            DataConfig(max_seq_len=model.max_seq_len),
+            batch_size=batch_size,
+            eval_batch_size=batch_size,
+            pin_memory=True,
+        ),
+        runtime=replace(
+            RuntimeConfig(),
+            train_steps=train_steps,
+            eval_every=1_000,
+            checkpoint_every=5_000,
+            log_every=10,
+            log_gradient_metrics=False,
+            dtype="bfloat16",
+        ),
     )
 
 
@@ -394,10 +404,6 @@ def get_config(name: str) -> ExperimentConfig:
             ),
             batch_size=8,
             eval_batch_size=8,
-            train_token_budget=65_536,
-            val_token_budget=8_192,
-            max_train_documents=512,
-            max_val_documents=128,
         ),
         "l2_smoke": _with_data(
             _with_objective(
@@ -418,10 +424,197 @@ def get_config(name: str) -> ExperimentConfig:
             ),
             batch_size=4,
             eval_batch_size=4,
-            train_token_budget=16_384,
-            val_token_budget=4_096,
-            max_train_documents=128,
-            max_val_documents=64,
+        ),
+        # ── GPU-scale presets (4070 Super, 12 GB) ──
+        "gpu_ce_50k": _gpu_baseline_config(
+            "gpu_ce_50k",
+            "ce_baseline",
+            train_steps=50_000,
+        ),
+        "gpu_l2_50k": _gpu_baseline_config(
+            "gpu_l2_50k",
+            "l2_sigreg",
+            train_steps=50_000,
+            lambda_sigreg=0.05,
+            sigreg_random_vocab_size=2_048,
+            l2_embedding_lr_scale=0.1,
+            embedding_init_std=0.01,
+            prediction_head_init_std=0.0,
+        ),
+        # Shorter GPU runs for quick validation
+        "gpu_ce_5k": _gpu_baseline_config(
+            "gpu_ce_5k",
+            "ce_baseline",
+            train_steps=5_000,
+        ),
+        "gpu_l2_5k": _gpu_baseline_config(
+            "gpu_l2_5k",
+            "l2_sigreg",
+            train_steps=5_000,
+            lambda_sigreg=0.05,
+            sigreg_random_vocab_size=2_048,
+            l2_embedding_lr_scale=0.1,
+            embedding_init_std=0.01,
+            prediction_head_init_std=0.0,
+        ),
+        "gpu_l2_5k_lam001": _gpu_baseline_config(
+            "gpu_l2_5k_lam001",
+            "l2_sigreg",
+            train_steps=5_000,
+            lambda_sigreg=0.001,
+            sigreg_random_vocab_size=2_048,
+            l2_embedding_lr_scale=0.1,
+            embedding_init_std=0.01,
+            prediction_head_init_std=0.0,
+        ),
+        "gpu_l2_5k_lam0001": _gpu_baseline_config(
+            "gpu_l2_5k_lam0001",
+            "l2_sigreg",
+            train_steps=5_000,
+            lambda_sigreg=0.0001,
+            sigreg_random_vocab_size=2_048,
+            l2_embedding_lr_scale=0.1,
+            embedding_init_std=0.01,
+            prediction_head_init_std=0.0,
+        ),
+        "gpu_l2_5k_sig2p5": _gpu_baseline_config(
+            "gpu_l2_5k_sig2p5",
+            "l2_sigreg",
+            train_steps=5_000,
+            lambda_sigreg=0.001,
+            sigreg_random_vocab_size=2_048,
+            l2_embedding_lr_scale=0.1,
+            embedding_init_std=0.02,
+            prediction_head_init_std=0.02,
+        ),
+        "gpu_l2_5k_pred10x": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.001,
+                sigreg_random_vocab_size=2_048,
+                l2_embedding_lr_scale=0.1,
+                embedding_init_std=0.02,
+                prediction_head_init_std=0.0,
+            ),
+            pred_loss_scale=10.0,
+        ),
+        "gpu_l2_5k_pred10x_v2": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v2",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.001,
+                sigreg_random_vocab_size=1_024,
+                l2_embedding_lr_scale=0.1,
+                embedding_init_std=0.02,
+                prediction_head_init_std=0.01,
+            ),
+            pred_loss_scale=10.0,
+        ),
+        "gpu_l2_5k_pred10x_v3": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v3",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.001,
+                sigreg_random_vocab_size=1_024,
+                l2_embedding_lr_scale=0.1,
+                embedding_init_std=0.1,
+                prediction_head_init_std=0.01,
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=False,
+        ),
+        "gpu_l2_5k_pred10x_v4": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v4",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.002,
+                sigreg_random_vocab_size=1_024,
+                l2_embedding_lr_scale=0.1,
+                embedding_init_std=0.15,
+                prediction_head_init_std=0.01,
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=True,
+        ),
+        "gpu_l2_5k_pred10x_v5": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v5",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.002,
+                sigreg_random_vocab_size=2_048,
+                l2_embedding_lr_scale=1.0,
+                embedding_init_std=0.3,
+                prediction_head_init_std=0.01,
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=True,
+        ),
+        "gpu_l2_5k_pred10x_v6": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v6",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.01,
+                sigreg_random_vocab_size=2_048,
+                l2_embedding_lr_scale=1.0,
+                embedding_init_std=0.5,
+                prediction_head_init_std=0.02,
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=True,
+        ),
+        "gpu_l2_5k_pred10x_v7": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v7",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.01,
+                sigreg_random_vocab_size=2_048,
+                l2_embedding_lr_scale=1.0,
+                embedding_init_std=0.8,
+                prediction_head_init_std=0.02,
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=True,
+        ),
+        "gpu_l2_5k_pred10x_v8": _with_objective(
+            _gpu_baseline_config(
+                "gpu_l2_5k_pred10x_v8",
+                "l2_sigreg",
+                train_steps=5_000,
+                lambda_sigreg=0.05,
+                sigreg_random_vocab_size=2_048,
+                l2_embedding_lr_scale=1.0,
+                embedding_init_std=1.0,
+                prediction_head_init_std=0.02,
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=True,
+        ),
+        # No prediction head — backbone output directly compared to embeddings
+        "gpu_l2_5k_nohead": _with_objective(
+            replace(
+                _gpu_baseline_config(
+                    "gpu_l2_5k_nohead",
+                    "l2_sigreg",
+                    train_steps=5_000,
+                    lambda_sigreg=0.05,
+                    sigreg_random_vocab_size=2_048,
+                    l2_embedding_lr_scale=1.0,
+                    embedding_init_std=1.0,
+                ),
+                model=replace(
+                    ModelConfig(), embedding_init_std=1.0, use_prediction_head=False
+                ),
+            ),
+            pred_loss_scale=10.0,
+            sigreg_include_active_predictions=True,
         ),
         "ce_smoke": _with_data(
             _with_optim(
@@ -435,10 +628,6 @@ def get_config(name: str) -> ExperimentConfig:
             ),
             batch_size=4,
             eval_batch_size=4,
-            train_token_budget=16_384,
-            val_token_budget=4_096,
-            max_train_documents=128,
-            max_val_documents=64,
         ),
     }
     if name not in presets:

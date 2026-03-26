@@ -39,8 +39,8 @@ def compute_retrieval_metrics(
     valid_targets = target_ids[target_mask]
     if valid_targets.numel() == 0:
         raise RuntimeError("No valid targets available for retrieval metrics.")
-    valid_prediction = prediction[target_mask]
-    embedding_table = model.token_embeddings.weight
+    valid_prediction = prediction[target_mask].float()
+    embedding_table = model.token_embeddings.weight  # already fp32
 
     ranks: list[torch.Tensor] = []
     top_hits = {1: 0, 5: 0, 10: 0}
@@ -89,7 +89,7 @@ def compute_ce_nll(
     target_ids: torch.Tensor,
     target_mask: torch.Tensor,
 ) -> tuple[float, int]:
-    logits = prediction[target_mask]
+    logits = prediction[target_mask].float()
     targets = target_ids[target_mask]
     nll = torch.nn.functional.cross_entropy(logits, targets, reduction="sum")
     return float(nll.item()), int(targets.numel())
@@ -105,8 +105,8 @@ def compute_harmax_nll(
     exponent: float | None = None,
 ) -> tuple[float, int]:
     valid_targets = target_ids[target_mask]
-    valid_prediction = prediction[target_mask]
-    embedding_table = model.token_embeddings.weight
+    valid_prediction = prediction[target_mask].float()
+    embedding_table = model.token_embeddings.weight  # already fp32
     pow_n = float(exponent if exponent is not None else model.config.model.d_model)
     total_nll = 0.0
     total_tokens = 0

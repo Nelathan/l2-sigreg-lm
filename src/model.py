@@ -67,7 +67,7 @@ class SelfAttention(nn.Module):
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         batch_size, seq_len, dim = x.shape
         q = (
@@ -89,14 +89,24 @@ class SelfAttention(nn.Module):
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
-        )
+        if attention_mask is None:
+            # No custom mask → pure causal. Enables flash attention kernel.
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                dropout_p=0.0,
+                is_causal=True,
+            )
+        else:
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            )
         y = y.transpose(1, 2).contiguous().view(batch_size, seq_len, dim)
         return self.out_proj(y)
 
@@ -124,13 +134,15 @@ class Block(nn.Module):
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        attention_mask: torch.Tensor,
-        token_mask: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        token_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         x = x + self.attn(self.attn_norm(x), cos, sin, attention_mask)
-        x = x * token_mask
+        if token_mask is not None:
+            x = x * token_mask
         x = x + self.mlp(self.ffn_norm(x))
-        x = x * token_mask
+        if token_mask is not None:
+            x = x * token_mask
         return x
 
 
@@ -203,20 +215,32 @@ class PackingTransformer(nn.Module):
         position_ids: torch.Tensor,
     ) -> ModelOutput:
         x = self.token_embeddings(input_ids)
-        token_mask = attention_mask.unsqueeze(-1).to(dtype=x.dtype)
-        x = x * token_mask
+        # When all tokens are valid (no padding), skip mask construction
+        # so SDPA can use the flash attention kernel via is_causal=True.
+        all_valid = attention_mask.all()
+        if all_valid:
+            token_mask = None
+            attn_mask = None
+        else:
+            token_mask = attention_mask.unsqueeze(-1).to(dtype=x.dtype)
+            x = x * token_mask
+            attn_mask = self.build_attention_mask(attention_mask)
         cos, sin = self.rope(position_ids)
-        attn_mask = self.build_attention_mask(attention_mask)
         for block in self.blocks:
             x = block(x, cos, sin, attn_mask, token_mask)
-        x = self.final_norm(x) * token_mask
+        if token_mask is not None:
+            x = self.final_norm(x) * token_mask
+        else:
+            x = self.final_norm(x)
 
         if self.config.objective.name == "ce_baseline":
             prediction = x @ self.token_embeddings.weight.t()
-        else:
+        elif self.config.model.use_prediction_head:
             prediction = self.prediction_head(x)
             if self.config.objective.learned_output_scale:
                 prediction = prediction * self.output_scale_log.exp()
+        else:
+            prediction = x
         return ModelOutput(hidden_states=x, prediction=prediction)
 
 
